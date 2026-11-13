@@ -1,0 +1,23 @@
+name: Daily 10 AM IST eGANNA Check
+
+on:
+  schedule:
+    # 10:00 AM IST = 04:30 UTC
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  check-purchies:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger eGANNA Daily Purchy Check
+        env:
+          APP_URL: ${{ secrets.EGANNA_APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$APP_URL" ]; then
+            echo "Error: EGANNA_APP_URL secret is not set in GitHub repository secrets."
+            exit 1
+          fi
+          curl --fail --retry 3 --retry-delay 10 -X POST \
+            "${APP_URL%/}/api/notifications/run-now?cron_secret=${CRON_SECRET}"

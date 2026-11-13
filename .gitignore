@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+cache.db
+.env
+eganna.apk
+eganna.xapk
+decompiled_eganna/
+extracted_endpoints_report.txt
