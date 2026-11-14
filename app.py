@@ -57,13 +57,15 @@ class FarmerProfile(BaseModel):
     purchy_issued_count: int
     total_weighed_qtl: float
     current_running_pakhwada: int = Field(ge=1, le=12)
-    current_running_column: int = Field(ge=1, le=5)
+    current_running_column: int = Field(ge=1, le=15)
+    current_running_slot: int = Field(default=1, ge=1, le=180)
 
 
 class SupplyTicket(BaseModel):
     purchy_no: str
     pakhwada: int = Field(ge=1, le=12)
-    column: int = Field(ge=1, le=5)
+    column: int = Field(ge=1, le=15)
+    slot_number: int = Field(default=1, ge=1, le=180)
     issue_date: str
     expiry_date: str
     mode: Literal["Gate", "Centre"]
@@ -72,23 +74,39 @@ class SupplyTicket(BaseModel):
     net_weight_qtl: Optional[float] = None
     weighment_date: Optional[str] = None
     vehicle_type: Optional[str] = None
+    coupled_base_count: int = 1
+    coupled_slots: List[str] = Field(default_factory=list)
 
 
 class CalendarSlot(BaseModel):
     pakhwada: int = Field(ge=1, le=12)
-    column: int = Field(ge=1, le=5)
-    slot_number: int = Field(ge=1, le=60)
+    column: int = Field(ge=1, le=15)
+    slot_number: int = Field(ge=1, le=180)
     main_count: int = 0
     additional_count: int = 0
     total_count: int = 0
     issued_count: int = 0
+    early_count: int = 0
+    general_count: int = 0
+    rejected_count: int = 0
     state: Literal["issued", "running", "upcoming", "passed_empty", "future_empty"]
+
+
+class CalendarSummary(BaseModel):
+    total_base_purchy: int = 0
+    issued_base_purchy: int = 0
+    remaining_base_purchy: int = 0
+    early_count: int = 0
+    general_count: int = 0
+    rejected_count: int = 0
+    over_weight: int = 0
 
 
 class GannaCalendar(BaseModel):
     running_pakhwada: int = Field(ge=1, le=12)
-    running_column: int = Field(ge=1, le=5)
-    running_slot_number: int = Field(ge=1, le=60)
+    running_column: int = Field(ge=1, le=15)
+    running_slot_number: int = Field(ge=1, le=180)
+    summary: CalendarSummary = Field(default_factory=CalendarSummary)
     slots: List[CalendarSlot]
 
 
@@ -314,13 +332,13 @@ class SQLiteTTLCache:
 
 
 def slot_to_linear(pakhwada: int, column: int) -> int:
-    return (pakhwada - 1) * 5 + column
+    return (pakhwada - 1) * 15 + column
 
 
 def calculate_next_purchy_eta(calendar: GannaCalendar) -> NextPurchyETA:
     """
     Calculate estimated days until next purchy is issued based on linear
-    distance in the 60-slot (12 Pakhwada x 5 Column) matrix (~3 days/column).
+    distance in the 180-slot (12 Fortnight x 15 Column) matrix (~1 day/column).
     """
     running_slot = calendar.running_slot_number
     for slot in calendar.slots:
@@ -329,11 +347,11 @@ def calculate_next_purchy_eta(calendar: GannaCalendar) -> NextPurchyETA:
         remaining_in_slot = max(0, slot.total_count - slot.issued_count)
         if remaining_in_slot > 0:
             slots_away = slot.slot_number - running_slot
-            estimated_days = slots_away * 3
+            estimated_days = slots_away
             if slots_away == 0:
-                label = f"Due in Current Slot (P{slot.pakhwada} • Col {slot.column})"
+                label = f"Due in Current Slot (FN {slot.pakhwada} • Col {slot.column})"
             else:
-                label = f"~{estimated_days} days (P{slot.pakhwada} • Col {slot.column})"
+                label = f"~{estimated_days} days (FN {slot.pakhwada} • Col {slot.column})"
             return NextPurchyETA(
                 next_pakhwada=slot.pakhwada,
                 next_column=slot.column,
@@ -366,21 +384,37 @@ def _build_calendar(
     main_schedule: Dict[Tuple[int, int], int],
     additional_schedule: Dict[Tuple[int, int], int],
     tickets: List[SupplyTicket],
+    variety_counts: Optional[Dict[Tuple[int, int], Tuple[int, int, int]]] = None,
+    summary_override: Optional[CalendarSummary] = None,
 ) -> GannaCalendar:
     running_slot_number = slot_to_linear(running_pakhwada, running_column)
     issued_by_slot: Dict[Tuple[int, int], int] = {}
     for t in tickets:
         key = (t.pakhwada, t.column)
-        issued_by_slot[key] = issued_by_slot.get(key, 0) + 1
+        issued_by_slot[key] = issued_by_slot.get(key, 0) + max(1, t.coupled_base_count)
 
     slots: List[CalendarSlot] = []
+    total_early = 0
+    total_general = 0
+    total_rejected = 0
+    total_base = 0
+    issued_base = 0
+
     for p in range(1, 13):
-        for c in range(1, 6):
+        for c in range(1, 16):
             slot_num = slot_to_linear(p, c)
             main_cnt = main_schedule.get((p, c), 0)
             add_cnt = additional_schedule.get((p, c), 0)
             total_cnt = main_cnt + add_cnt
             issued_cnt = issued_by_slot.get((p, c), 0)
+            ear, gen, rej = (variety_counts or {}).get((p, c), (main_cnt, 0, 0))
+
+            total_base += total_cnt
+            total_early += ear
+            total_general += gen
+            total_rejected += rej
+            if issued_cnt > 0:
+                issued_base += min(total_cnt, issued_cnt) if total_cnt > 0 else issued_cnt
 
             if slot_num == running_slot_number:
                 state: Literal[
@@ -404,14 +438,28 @@ def _build_calendar(
                     additional_count=add_cnt,
                     total_count=total_cnt,
                     issued_count=issued_cnt,
+                    early_count=ear,
+                    general_count=gen,
+                    rejected_count=rej,
                     state=state,
                 )
             )
+
+    summary = summary_override or CalendarSummary(
+        total_base_purchy=total_base,
+        issued_base_purchy=issued_base,
+        remaining_base_purchy=max(0, total_base - issued_base),
+        early_count=total_early,
+        general_count=total_general,
+        rejected_count=total_rejected,
+        over_weight=0,
+    )
 
     return GannaCalendar(
         running_pakhwada=running_pakhwada,
         running_column=running_column,
         running_slot_number=running_slot_number,
+        summary=summary,
         slots=slots,
     )
 
@@ -717,19 +765,23 @@ def _build_deterministic_custom_profile(
     for (p, c), cnt in sorted(main_schedule.items()):
         if slot_to_linear(p, c) < running_linear:
             is_latest = idx == 3
+            mode_val: Literal["Gate", "Centre"] = "Gate" if seed % 2 == 0 else "Centre"
             tickets.append(
                 SupplyTicket(
                     purchy_no=f"UP26-{ugc[-4:]}-{idx:03d}",
                     pakhwada=p,
                     column=c,
+                    slot_number=slot_to_linear(p, c),
                     issue_date=f"2026-10-{min(28, 3 + idx * 5):02d}",
                     expiry_date=f"2026-10-{min(31, 6 + idx * 5):02d}",
-                    mode="Gate" if seed % 2 == 0 else "Centre",
+                    mode=mode_val,
                     centre_name=f"{village or 'Village'} Gate",
                     status="Active" if is_latest else "Weighed",
                     net_weight_qtl=None if is_latest else round(38.0 + (idx * 1.7), 2),
                     weighment_date=None if is_latest else f"2026-10-{min(30, 5 + idx * 5):02d}",
                     vehicle_type="Tractor Trolley",
+                    coupled_base_count=2 if mode_val == "Gate" else 1,
+                    coupled_slots=[f"FN {p} • Col {c} (Slot #{slot_to_linear(p, c)})"],
                 )
             )
             idx += 1
@@ -999,24 +1051,24 @@ async def _fetch_live_caneup_by_ugc(
 
     main_schedule: Dict[Tuple[int, int], int] = {}
     additional_schedule: Dict[Tuple[int, int], int] = {}
+    variety_counts: Dict[Tuple[int, int], Tuple[int, int, int]] = {}
     tickets_by_no: Dict[str, SupplyTicket] = {}
 
-    # Try to detect running pakhwada/column from page text or TextBox1/2/3
+    # Try to detect running pakhwada/column (1..12 x 1..15) from page text
     running_p = 1
     running_c = 1
     run_m = re.search(
-        r"(?:Running|Current)\s*(?:Pakhwada|Fortnight)[^0-9]{1,20}(\d{1,2}).{0,40}?(?:Col(?:umn)?)[^0-9]{1,20}([1-5])",
+        r"(?:Running|Current)\s*(?:Pakhwada|Fortnight)[^0-9]{1,20}(\d{1,2}).{0,40}?(?:Col(?:umn)?)[^0-9]{1,20}(\d{1,2})",
         result_html,
         re.I | re.S,
     )
     if run_m:
         rp, rc = int(run_m.group(1)), int(run_m.group(2))
-        if 1 <= rp <= 12 and 1 <= rc <= 5:
+        if 1 <= rp <= 12 and 1 <= rc <= 15:
             running_p, running_c = rp, rc
 
     for tbl_id, rows in parser.tables:
         header_row = rows[0] if rows else []
-        header_text = " ".join(header_row).lower()
         tid_lower = tbl_id.lower()
 
         # Skip Last Year, SMS Log, Plot/Survey tables completely
@@ -1026,21 +1078,26 @@ async def _fetch_live_caneup_by_ugc(
         ):
             continue
 
-        # 1. Parse 12x5 Ganna Calendar (Main & Additional)
+        # 1. Parse 12x15 Ganna Calendar (Main & Additional)
         if "grdcalender" in tid_lower or "addnlcalender" in tid_lower or ("calender" in tid_lower and len(rows) >= 12):
-            # Locate column indices for '01'..'05' from header row
+            # Locate column indices for '01'..'15' from header row
             col_indices: List[int] = []
-            for target_col in ("01", "02", "03", "04", "05"):
+            for target_num in range(1, 16):
                 found_idx = next(
-                    (idx for idx, h in enumerate(header_row) if h.strip().lstrip("0") == target_col.lstrip("0")),
+                    (
+                        idx
+                        for idx, h in enumerate(header_row)
+                        if h.strip().isdigit() and int(h.strip()) == target_num
+                    ),
                     None,
                 )
                 if found_idx is not None:
                     col_indices.append(found_idx)
-            if len(col_indices) != 5:
-                # Fallback: last 5 columns if header didn't match '01'..'05'
-                width = max((len(r) for r in rows), default=6)
-                col_indices = list(range(max(1, width - 5), width))
+            if len(col_indices) != 15:
+                # Fallback: take up to 15 trailing columns
+                width = max((len(r) for r in rows), default=17)
+                start_col = max(1, width - 15)
+                col_indices = list(range(start_col, min(width, start_col + 15)))
 
             target = additional_schedule if "add" in tid_lower else main_schedule
             current_pakh: Optional[int] = None
@@ -1048,24 +1105,38 @@ async def _fetch_live_caneup_by_ugc(
                 if not r:
                     continue
                 first_cell = r[0].strip()
-                if re.fullmatch(r"(?:P)?([1-9]|1[0-2])", first_cell, re.I):
+                if re.fullmatch(r"(?:P|FN)?\s*0?([1-9]|1[0-2])", first_cell, re.I):
                     current_pakh = int(re.sub(r"[^0-9]", "", first_cell))
                 if current_pakh is None:
                     continue
+
+                row_label = " ".join(r[:2]).lower()
+                is_gen = any(k in row_label for k in ("सामान्य", "gen"))
+                is_rej = any(k in row_label for k in ("अनुपयुक्त", "rej"))
+
                 for col_pos, cell_idx in enumerate(col_indices, start=1):
                     if cell_idx >= len(r):
                         continue
                     cell_val = r[cell_idx].strip()
-                    # A calendar cell may have a count (0..25) or a purchy number / '*'
                     if cell_val.isdigit():
                         num = int(cell_val)
                         cnt = 1 if num >= 100000 else (num if num <= 25 else 0)
                         if cnt > 0:
-                            target[(current_pakh, col_pos)] = target.get((current_pakh, col_pos), 0) + cnt
+                            key = (current_pakh, col_pos)
+                            target[key] = target.get(key, 0) + cnt
+                            ear, gen, rej = variety_counts.get(key, (0, 0, 0))
+                            if is_gen:
+                                gen += cnt
+                            elif is_rej:
+                                rej += cnt
+                            else:
+                                ear += cnt
+                            variety_counts[key] = (ear, gen, rej)
             continue
 
         # 2. Parse Current Season Supply Tickets (tcMasterInfo_tplSupply_grdSupply)
         if "grdsupply" in tid_lower and "lastyear" not in tid_lower:
+            print(f"[grdSupply_sample] head={header_row} first_row={rows[1] if len(rows) > 1 else []}")
             for r in rows[1:]:
                 joined = " ".join(r)
                 p_match = re.search(r"\b(\d{10,14})\b", joined)
@@ -1074,7 +1145,7 @@ async def _fetch_live_caneup_by_ugc(
                 p_no = p_match.group(1)
 
                 t_pakh, t_col = running_p, running_c
-                pc_match = re.search(r"\b([1-9]|1[0-2])\s*[/\-]\s*([1-5])\b", joined)
+                pc_match = re.search(r"\b0?([1-9]|1[0-2])\s*[/\-]\s*0?([1-9]|1[0-5])\b", joined)
                 if pc_match:
                     t_pakh, t_col = int(pc_match.group(1)), int(pc_match.group(2))
 
@@ -1086,10 +1157,13 @@ async def _fetch_live_caneup_by_ugc(
                     status = "Weighed"
 
                 mode: Literal["Gate", "Centre"] = "Centre" if any(w in joined.lower() for w in ("cent", "केंद्र", "केन्द्र")) else "Gate"
+                coupled_cnt = 2 if mode == "Gate" else 1
+                slot_num = slot_to_linear(t_pakh, t_col)
                 tickets_by_no[p_no] = SupplyTicket(
                     purchy_no=p_no,
                     pakhwada=t_pakh,
                     column=t_col,
+                    slot_number=slot_num,
                     issue_date=dates[0] if len(dates) >= 1 else "—",
                     expiry_date=dates[1] if len(dates) >= 2 else "—",
                     mode=mode,
@@ -1097,21 +1171,28 @@ async def _fetch_live_caneup_by_ugc(
                     status=status,
                     net_weight_qtl=None,
                     weighment_date=None,
+                    coupled_base_count=coupled_cnt,
+                    coupled_slots=[f"FN {t_pakh} • Col {t_col} (Slot #{slot_num})"],
                 )
             continue
 
         # 3. Parse Current Season Weighment / Taul Receipts (tcMasterInfo_tplCane_grdCane)
         if "grdcane" in tid_lower:
+            print(f"[grdCane_sample] head={header_row} first_row={rows[1] if len(rows) > 1 else []}")
             for r in rows[1:]:
                 joined = " ".join(r)
                 p_match = re.search(r"\b(\d{10,14})\b", joined)
                 if not p_match:
                     continue
                 p_no = p_match.group(1)
-                # Look for decimal weights (Net weight is usually the last or smallest positive decimal < 200 Qtl)
                 floats = [float(x) for x in re.findall(r"\b(\d+\.\d{1,3})\b", joined) if 0.5 <= float(x) <= 250.0]
                 net_wt = floats[-1] if floats else None
                 dates = re.findall(r"\b\d{2}[-/]\d{2}[-/]\d{4}\b", joined)
+
+                t_pakh, t_col = running_p, running_c
+                pc_match = re.search(r"\b0?([1-9]|1[0-2])\s*[/\-]\s*0?([1-9]|1[0-5])\b", joined)
+                if pc_match:
+                    t_pakh, t_col = int(pc_match.group(1)), int(pc_match.group(2))
 
                 existing = tickets_by_no.get(p_no)
                 if existing:
@@ -1120,23 +1201,31 @@ async def _fetch_live_caneup_by_ugc(
                         existing.status = "Weighed"
                     if dates and not existing.weighment_date:
                         existing.weighment_date = dates[0]
+                    if pc_match and existing.pakhwada == 1 and existing.column == 1:
+                        existing.pakhwada = t_pakh
+                        existing.column = t_col
+                        existing.slot_number = slot_to_linear(t_pakh, t_col)
                 else:
+                    mode_val: Literal["Gate", "Centre"] = "Centre" if any(w in joined.lower() for w in ("cent", "केंद्र", "केन्द्र")) else "Gate"
+                    slot_num = slot_to_linear(t_pakh, t_col)
                     tickets_by_no[p_no] = SupplyTicket(
                         purchy_no=p_no,
-                        pakhwada=running_p,
-                        column=running_c,
+                        pakhwada=t_pakh,
+                        column=t_col,
+                        slot_number=slot_num,
                         issue_date=dates[0] if dates else "—",
                         expiry_date="—",
-                        mode="Centre" if any(w in joined.lower() for w in ("cent", "केंद्र", "केन्द्र")) else "Gate",
+                        mode=mode_val,
                         centre_name=factory,
                         status="Weighed" if net_wt else "Active",
                         net_weight_qtl=net_wt,
                         weighment_date=dates[0] if dates else None,
+                        coupled_base_count=2 if mode_val == "Gate" else 1,
+                        coupled_slots=[f"FN {t_pakh} • Col {t_col} (Slot #{slot_num})"],
                     )
 
     tickets = list(tickets_by_no.values())
     if not run_m and tickets:
-        # Infer running slot from latest issued ticket if not explicitly printed
         latest_slot = max((slot_to_linear(t.pakhwada, t.column), t.pakhwada, t.column) for t in tickets)
         running_p, running_c = latest_slot[1], latest_slot[2]
 
@@ -1146,6 +1235,7 @@ async def _fetch_live_caneup_by_ugc(
         main_schedule=main_schedule,
         additional_schedule=additional_schedule,
         tickets=tickets,
+        variety_counts=variety_counts,
     )
     total_allotted = sum(s.total_count for s in calendar.slots)
     total_weighed = round(sum(t.net_weight_qtl for t in tickets if t.net_weight_qtl is not None), 2)
@@ -1167,6 +1257,7 @@ async def _fetch_live_caneup_by_ugc(
         total_weighed_qtl=total_weighed,
         current_running_pakhwada=running_p,
         current_running_column=running_c,
+        current_running_slot=slot_to_linear(running_p, running_c),
     )
     return profile, tickets, calendar, "live"
 
@@ -1266,6 +1357,12 @@ class EGannaUpstreamAdapter:
         )
 
         tickets: List[SupplyTicket] = raw["tickets"]
+        for t in tickets:
+            t.slot_number = slot_to_linear(t.pakhwada, t.column)
+            t.coupled_base_count = 2 if t.mode == "Gate" else 1
+            if not t.coupled_slots:
+                t.coupled_slots = [f"FN {t.pakhwada} • Col {t.column} (Slot #{t.slot_number})"]
+
         calendar = _build_calendar(
             running_pakhwada=raw["running_pakhwada"],
             running_column=raw["running_column"],
@@ -1296,6 +1393,7 @@ class EGannaUpstreamAdapter:
             total_weighed_qtl=total_weighed,
             current_running_pakhwada=raw["running_pakhwada"],
             current_running_column=raw["running_column"],
+            current_running_slot=slot_to_linear(raw["running_pakhwada"], raw["running_column"]),
         )
         return profile, tickets, calendar, "mock"
 
