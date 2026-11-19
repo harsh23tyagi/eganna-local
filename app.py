@@ -1153,8 +1153,6 @@ async def _fetch_live_caneup_by_ugc(
                 status: Literal["Active", "Weighed", "Expired"] = "Active"
                 if any(w in joined.lower() for w in ("expir", "निरस्त", "समाप्त")):
                     status = "Expired"
-                elif any(w in joined.lower() for w in ("weigh", "तौल", "पूर्ण")):
-                    status = "Weighed"
 
                 mode: Literal["Gate", "Centre"] = "Centre" if any(w in joined.lower() for w in ("cent", "केंद्र", "केन्द्र")) else "Gate"
                 coupled_cnt = 2 if mode == "Gate" else 1
@@ -1196,7 +1194,7 @@ async def _fetch_live_caneup_by_ugc(
 
                 existing = tickets_by_no.get(p_no)
                 if existing:
-                    if net_wt is not None:
+                    if net_wt is not None and net_wt > 0:
                         existing.net_weight_qtl = net_wt
                         existing.status = "Weighed"
                     if dates and not existing.weighment_date:
