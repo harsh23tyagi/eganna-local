@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 BASE_DIR = Path(__file__).resolve().parent
 CACHE_DB_PATH = Path(os.getenv("EGANNA_CACHE_DB", str(BASE_DIR / "cache.db")))
 DEFAULT_CACHE_TTL_SECONDS = int(os.getenv("EGANNA_CACHE_TTL", "1200"))  # 20 minutes
-EGANNA_MODE = os.getenv("EGANNA_MODE", "mock").lower()  # "mock" or "live"
+EGANNA_MODE = os.getenv("EGANNA_MODE", "live").lower()  # "live" or "mock"
 EGANNA_BASE_URL = os.getenv("EGANNA_BASE_URL", "https://164.100.181.16")
 
 ANDROID_HEADERS = {
@@ -1431,22 +1431,35 @@ async def _resolve_cane_dashboard(
         cached = cache.get(cache_key, DEFAULT_CACHE_TTL_SECONDS)
         if cached is not None:
             payload, age = cached
-            payload["cache_hit"] = True
-            payload["cache_status"] = "cache_hit"
-            payload["cache_age_seconds"] = age
-            return CaneDashboardResponse(**payload)
+            if payload.get("source") == "live" or adapter.mode == "mock":
+                payload["cache_hit"] = True
+                payload["cache_status"] = "cache_hit"
+                payload["cache_age_seconds"] = age
+                return CaneDashboardResponse(**payload)
 
     try:
-        if session_id:
-            live_session = caneup_sessions.get_session(session_id)
-            if not live_session or not live_session.verified:
-                raise HTTPException(
-                    status_code=401,
-                    detail="Live enquiry.caneup.in session expired or not verified. Please solve CAPTCHA again.",
-                )
+        live_session = caneup_sessions.get_session(session_id) if session_id else None
+        if not live_session and adapter.mode == "live":
+            live_session = next(
+                (s for s in caneup_sessions._sessions.values() if s.verified),
+                None,
+            )
+
+        if session_id and (not live_session or not live_session.verified):
+            raise HTTPException(
+                status_code=401,
+                detail="Live enquiry.caneup.in session expired or not verified. Please solve CAPTCHA.",
+            )
+
+        if live_session and live_session.verified:
             profile, tickets, calendar, source = await _fetch_live_caneup_by_ugc(
                 session=live_session,
                 ugc=ugc,
+            )
+        elif adapter.mode == "live":
+            raise HTTPException(
+                status_code=401,
+                detail="Live enquiry.caneup.in CAPTCHA verification required.",
             )
         else:
             profile, tickets, calendar, source = await adapter.fetch_by_ugc(

@@ -49,9 +49,9 @@
           <div class="min-w-0">
             <div class="flex items-center gap-1.5">
               <h1 class="text-sm font-bold tracking-tight text-white truncate">eGANNA Tracker</h1>
-              <button id="openCaptchaBtn" type="button" title="Connect Live via enquiry.caneup.in"
-                class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/40 transition">
-                <span id="sourceBadge">MOCK</span> • Go Live
+              <button id="openCaptchaBtn" type="button" title="Verify CAPTCHA for enquiry.caneup.in"
+                class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/40 transition">
+                <span id="sourceBadge">LIVE</span> • CAPTCHA
               </button>
             </div>
             <p id="cacheMeta" class="text-[11px] text-slate-400 truncate">Loading profile...</p>
@@ -576,11 +576,12 @@
 
       try {
         const res = await fetch(url);
-        if (res.status === 401 && state.liveSessionId) {
+        if (res.status === 401) {
           state.liveSessionId = null;
           sessionStorage.removeItem("eganna_live_session_id");
           openCaptchaModal();
-          throw new Error("Live session expired. Please solve the CAPTCHA again.");
+          el("cacheMeta").textContent = "CAPTCHA required to fetch live data";
+          return;
         }
         if (!res.ok) {
           const err = await res.json().catch(() => ({ detail: res.statusText }));
