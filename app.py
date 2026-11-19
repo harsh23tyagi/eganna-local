@@ -1730,7 +1730,11 @@ async def run_daily_check_now(
 
 @app.get("/", include_in_schema=False)
 async def serve_pwa_index() -> FileResponse:
-    return FileResponse(BASE_DIR / "index.html", media_type="text/html")
+    return FileResponse(
+        BASE_DIR / "index.html",
+        media_type="text/html",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
 
 
 @app.get("/manifest.json", include_in_schema=False)
