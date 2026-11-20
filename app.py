@@ -1137,6 +1137,11 @@ async def _fetch_live_caneup_by_ugc(
         # 2. Parse Current Season Supply Tickets (tcMasterInfo_tplSupply_grdSupply)
         if "grdsupply" in tid_lower and "lastyear" not in tid_lower:
             print(f"[grdSupply_sample] head={header_row} first_row={rows[1] if len(rows) > 1 else []}")
+            issue_col = next((i for i, h in enumerate(header_row) if "जारी" in h or "issue" in h.lower()), None)
+            valid_col = next((i for i, h in enumerate(header_row) if "लाने" in h or "valid" in h.lower() or "expir" in h.lower()), None)
+            date_pat = re.compile(
+                r"\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/\s][A-Za-z]{3}[-/\s]\d{2,4}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b"
+            )
             for r in rows[1:]:
                 joined = " ".join(r)
                 p_match = re.search(r"\b(\d{10,14})\b", joined)
@@ -1149,7 +1154,17 @@ async def _fetch_live_caneup_by_ugc(
                 if pc_match:
                     t_pakh, t_col = int(pc_match.group(1)), int(pc_match.group(2))
 
-                dates = re.findall(r"\b\d{2}[-/]\d{2}[-/]\d{4}\b", joined)
+                dates = date_pat.findall(joined)
+                issue_dt = (
+                    r[issue_col].strip()
+                    if issue_col is not None and issue_col < len(r) and r[issue_col].strip() not in ("", "-", "—")
+                    else (dates[0] if len(dates) >= 1 else "—")
+                )
+                expiry_dt = (
+                    r[valid_col].strip()
+                    if valid_col is not None and valid_col < len(r) and r[valid_col].strip() not in ("", "-", "—")
+                    else (dates[1] if len(dates) >= 2 else "—")
+                )
                 status: Literal["Active", "Weighed", "Expired"] = "Active"
                 if any(w in joined.lower() for w in ("expir", "निरस्त", "समाप्त")):
                     status = "Expired"
@@ -1162,8 +1177,8 @@ async def _fetch_live_caneup_by_ugc(
                     pakhwada=t_pakh,
                     column=t_col,
                     slot_number=slot_num,
-                    issue_date=dates[0] if len(dates) >= 1 else "—",
-                    expiry_date=dates[1] if len(dates) >= 2 else "—",
+                    issue_date=issue_dt,
+                    expiry_date=expiry_dt,
                     mode=mode,
                     centre_name=factory,
                     status=status,
@@ -1177,6 +1192,9 @@ async def _fetch_live_caneup_by_ugc(
         # 3. Parse Current Season Weighment / Taul Receipts (tcMasterInfo_tplCane_grdCane)
         if "grdcane" in tid_lower:
             print(f"[grdCane_sample] head={header_row} first_row={rows[1] if len(rows) > 1 else []}")
+            date_pat = re.compile(
+                r"\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/\s][A-Za-z]{3}[-/\s]\d{2,4}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b"
+            )
             for r in rows[1:]:
                 joined = " ".join(r)
                 p_match = re.search(r"\b(\d{10,14})\b", joined)
@@ -1185,7 +1203,7 @@ async def _fetch_live_caneup_by_ugc(
                 p_no = p_match.group(1)
                 floats = [float(x) for x in re.findall(r"\b(\d+\.\d{1,3})\b", joined) if 0.5 <= float(x) <= 250.0]
                 net_wt = floats[-1] if floats else None
-                dates = re.findall(r"\b\d{2}[-/]\d{2}[-/]\d{4}\b", joined)
+                dates = date_pat.findall(joined)
 
                 t_pakh, t_col = running_p, running_c
                 pc_match = re.search(r"\b0?([1-9]|1[0-2])\s*[/\-]\s*0?([1-9]|1[0-5])\b", joined)
